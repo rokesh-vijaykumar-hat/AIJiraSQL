@@ -8,8 +8,10 @@ import logging
 import asyncio
 from flask import Blueprint, request, jsonify
 
+from config import Config
 from database import DatabaseConnection
 from jira_service import JiraService
+from openai_service import OpenAIService
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -18,32 +20,38 @@ logger = logging.getLogger(__name__)
 # Create a blueprint for the gateway routes
 gateway_bp = Blueprint('gateway', __name__)
 
-# AI Agent service URL - configurable from environment for Docker Compose
-AI_AGENT_URL = os.environ.get('AI_AGENT_URL', 'http://localhost:8080')
-
 # Initialize services
 db_connection = DatabaseConnection()
 jira_service = JiraService()
+openai_service = OpenAIService()
 
 @gateway_bp.route('/api/health', methods=['GET'])
 def check_health():
     """Check health of all services"""
     health_status = {
         'gateway': 'healthy',
-        'ai_agent': 'unknown',
         'database': 'unknown',
-        'jira': 'unknown'
+        'jira': 'unknown',
+        'ai_integration': 'unknown'
     }
     
-    # Check AI Agent health
-    try:
-        ai_response = requests.get(f"{AI_AGENT_URL}/health", timeout=5)
-        if ai_response.status_code == 200:
-            health_status['ai_agent'] = 'healthy'
+    # Check the appropriate AI integration based on the configuration
+    if Config.is_direct_mode():
+        health_status['ai_integration_mode'] = 'direct'
+        if openai_service.is_configured:
+            health_status['ai_integration'] = 'configured'
         else:
-            health_status['ai_agent'] = 'unhealthy'
-    except Exception as e:
-        health_status['ai_agent'] = f'error: {str(e)}'
+            health_status['ai_integration'] = 'not configured'
+    elif Config.is_agent_mode():
+        health_status['ai_integration_mode'] = 'agent'
+        try:
+            ai_response = requests.get(f"{Config.AI_AGENT_URL}/health", timeout=5)
+            if ai_response.status_code == 200:
+                health_status['ai_integration'] = 'healthy'
+            else:
+                health_status['ai_integration'] = 'unhealthy'
+        except Exception as e:
+            health_status['ai_integration'] = f'error: {str(e)}'
     
     # Check database health
     if db_connection.is_configured:
@@ -127,7 +135,7 @@ def get_jira_context(issue_key):
 
 @gateway_bp.route('/api/sql/generate', methods=['POST'])
 def generate_sql():
-    """Route natural language to SQL requests to the AI Agent"""
+    """Generate SQL from natural language query using configured AI method"""
     data = request.json
     
     if not data or 'query' not in data:
@@ -139,13 +147,8 @@ def generate_sql():
     # Get schema info from database
     schema_info = db_connection.get_schema_info()
     
-    # Prepare request for AI Agent
-    ai_request = {
-        'query': data['query'],
-        'schema_info': schema_info
-    }
-    
-    # Add Jira context if issue key is provided
+    # Extract Jira context if issue key is provided
+    jira_context = None
     if 'jira_issue_key' in data and data['jira_issue_key']:
         try:
             # Use asyncio to run coroutine
@@ -153,44 +156,96 @@ def generate_sql():
             asyncio.set_event_loop(loop)
             jira_context = loop.run_until_complete(jira_service.extract_context(data['jira_issue_key']))
             loop.close()
-            
-            ai_request['jira_context'] = jira_context
         except Exception as e:
             logger.warning(f"Could not extract Jira context: {str(e)}")
     
-    # Add additional context if provided
-    if 'additional_context' in data and data['additional_context']:
-        ai_request['additional_context'] = data['additional_context']
+    # Get additional context if provided
+    additional_context = data.get('additional_context')
     
     try:
-        # Forward request to AI Agent
-        response = requests.post(
-            f"{AI_AGENT_URL}/generate-sql",
-            json=ai_request,
-            timeout=30
-        )
+        # Choose AI method based on configuration
+        if Config.is_direct_mode():
+            # Use OpenAI directly
+            if not openai_service.is_configured:
+                return jsonify({
+                    'success': False,
+                    'message': 'OpenAI service is not configured with a valid API key'
+                }), 503
+            
+            # Use asyncio to run coroutine
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            result = loop.run_until_complete(
+                openai_service.generate_sql(
+                    data['query'], 
+                    schema_info, 
+                    jira_context, 
+                    additional_context
+                )
+            )
+            loop.close()
+            
+            return jsonify({
+                'success': True,
+                'data': {
+                    'sql': result['sql_query'],
+                    'explanation': result['explanation'],
+                    'mode': 'direct'
+                },
+                'message': 'Query generated successfully using OpenAI directly'
+            })
+            
+        elif Config.is_agent_mode():
+            # Use AI Agent service
+            # Prepare request for AI Agent
+            ai_request = {
+                'query': data['query'],
+                'schema_info': schema_info
+            }
+            
+            # Add context if available
+            if jira_context:
+                ai_request['jira_context'] = jira_context
+            
+            if additional_context:
+                ai_request['additional_context'] = additional_context
+            
+            # Forward request to AI Agent
+            response = requests.post(
+                f"{Config.AI_AGENT_URL}/generate-sql",
+                json=ai_request,
+                timeout=30
+            )
+            
+            if response.status_code != 200:
+                return jsonify({
+                    'success': False,
+                    'message': f'AI Agent returned error: {response.text}'
+                }), response.status_code
+            
+            # Return the AI Agent response
+            result = response.json()
+            return jsonify({
+                'success': True,
+                'data': {
+                    'sql': result['sql_query'],
+                    'explanation': result['explanation'],
+                    'mode': 'agent'
+                },
+                'message': 'Query generated successfully using AI Agent'
+            })
         
-        if response.status_code != 200:
+        else:
             return jsonify({
                 'success': False,
-                'message': f'AI Agent returned error: {response.text}'
-            }), response.status_code
-        
-        # Return the AI Agent response
-        result = response.json()
-        return jsonify({
-            'success': True,
-            'data': {
-                'sql': result['sql_query'],
-                'explanation': result['explanation']
-            },
-            'message': 'Query generated successfully'
-        })
+                'message': f'Invalid AI integration mode: {Config.AI_INTERACTION_MODE}'
+            }), 500
         
     except Exception as e:
+        logger.error(f"Error generating SQL: {str(e)}")
         return jsonify({
             'success': False,
-            'message': f'Error communicating with AI Agent: {str(e)}'
+            'message': f'Error generating SQL: {str(e)}'
         }), 500
 
 @gateway_bp.route('/api/sql/execute', methods=['POST'])
@@ -240,7 +295,7 @@ def execute_sql():
     try:
         # Step 1: Get SQL from AI Agent
         sql_response = requests.post(
-            f"{AI_AGENT_URL}/generate-sql",
+            f"{Config.AI_AGENT_URL}/generate-sql",
             json=ai_request,
             timeout=30
         )
@@ -259,7 +314,7 @@ def execute_sql():
         
         # Step 3: Get AI to explain the results
         explain_response = requests.post(
-            f"{AI_AGENT_URL}/explain-results",
+            f"{Config.AI_AGENT_URL}/explain-results",
             json={
                 'query': data['query'],
                 'sql': sql_query,

@@ -80,13 +80,18 @@ Format your response as a JSON object with keys 'sql_query' and 'explanation'.
         end_time = time.time()
         
         # Parse response
-        result = json.loads(response.choices[0].message.content)
-        
-        print(f"Query generation time: {end_time - start_time:.2f} seconds")
-        return SQLResponse(
-            sql_query=result["sql_query"],
-            explanation=result["explanation"]
-        )
+        content = response.choices[0].message.content
+        # Ensure content is a string before parsing as JSON
+        if content is not None and isinstance(content, str):
+            result = json.loads(content)
+            
+            print(f"Query generation time: {end_time - start_time:.2f} seconds")
+            return SQLResponse(
+                sql_query=result["sql_query"],
+                explanation=result["explanation"]
+            )
+        else:
+            raise HTTPException(status_code=500, detail="Empty or invalid response from OpenAI API")
     
     except Exception as e:
         print(f"Error generating SQL: {e}")

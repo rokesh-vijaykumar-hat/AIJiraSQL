@@ -1,18 +1,22 @@
-from flask import Flask, request, jsonify, render_template
+from flask import Flask, request, jsonify, render_template, send_from_directory
 import os
 from werkzeug.middleware.proxy_fix import ProxyFix
+from flask_cors import CORS
+from gateway import gateway_bp
 
-app = Flask(__name__)
+app = Flask(__name__, static_folder='static')
 app.secret_key = os.environ.get("SESSION_SECRET", "default-secret-key")
 app.wsgi_app = ProxyFix(app.wsgi_app, x_proto=1, x_host=1)
 
+# Enable CORS
+CORS(app)
+
+# Register blueprints
+app.register_blueprint(gateway_bp)
+
 @app.route('/')
 def index():
-    return jsonify({
-        "status": "up",
-        "message": "AI SQL Agent API - Gateway service is running",
-        "version": "1.0.0"
-    })
+    return send_from_directory('static', 'index.html')
 
 @app.route('/health')
 def health():

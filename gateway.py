@@ -169,75 +169,108 @@ def generate_sql():
     try:
         # Choose AI method based on configuration
         if Config.is_direct_mode():
-            # Use OpenAI directly
-            if not openai_service.is_configured:
+            # Use OpenAI directly with mock fallback
+            try:
+                # Use asyncio to run coroutine
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                result = loop.run_until_complete(
+                    openai_service.generate_sql(
+                        data['query'], 
+                        schema_info, 
+                        jira_context, 
+                        additional_context
+                    )
+                )
+                loop.close()
+                
+                return jsonify({
+                    'success': True,
+                    'data': {
+                        'sql': result['sql_query'],
+                        'explanation': result['explanation'],
+                        'mode': 'direct'
+                    },
+                    'message': 'Query generated successfully using OpenAI directly'
+                })
+            except Exception as e:
+                logger.error(f"Error generating SQL using direct OpenAI: {str(e)}")
                 return jsonify({
                     'success': False,
-                    'message': 'OpenAI service is not configured with a valid API key'
-                }), 503
-            
-            # Use asyncio to run coroutine
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            result = loop.run_until_complete(
-                openai_service.generate_sql(
-                    data['query'], 
-                    schema_info, 
-                    jira_context, 
-                    additional_context
-                )
-            )
-            loop.close()
-            
-            return jsonify({
-                'success': True,
-                'data': {
-                    'sql': result['sql_query'],
-                    'explanation': result['explanation'],
-                    'mode': 'direct'
-                },
-                'message': 'Query generated successfully using OpenAI directly'
-            })
+                    'message': f'Error generating SQL: {str(e)}'
+                }), 500
             
         elif Config.is_agent_mode():
-            # Use AI Agent service
-            # Prepare request for AI Agent
-            ai_request = {
-                'query': data['query'],
-                'schema_info': schema_info
-            }
-            
-            # Add context if available
-            if jira_context:
-                ai_request['jira_context'] = jira_context
-            
-            if additional_context:
-                ai_request['additional_context'] = additional_context
-            
-            # Forward request to AI Agent
-            response = requests.post(
-                f"{Config.AI_AGENT_URL}/generate-sql",
-                json=ai_request,
-                timeout=30
-            )
-            
-            if response.status_code != 200:
+            # Use AI Agent service with direct mode fallback
+            try:
+                # Prepare request for AI Agent
+                ai_request = {
+                    'query': data['query'],
+                    'schema_info': schema_info
+                }
+                
+                # Add context if available
+                if jira_context:
+                    ai_request['jira_context'] = jira_context
+                
+                if additional_context:
+                    ai_request['additional_context'] = additional_context
+                
+                # Forward request to AI Agent
+                response = requests.post(
+                    f"{Config.AI_AGENT_URL}/generate-sql",
+                    json=ai_request,
+                    timeout=10  # Shorter timeout to fail faster
+                )
+                
+                if response.status_code != 200:
+                    raise Exception(f"AI Agent returned error: {response.text}")
+                
+                # Return the AI Agent response
+                result = response.json()
                 return jsonify({
-                    'success': False,
-                    'message': f'AI Agent returned error: {response.text}'
-                }), response.status_code
-            
-            # Return the AI Agent response
-            result = response.json()
-            return jsonify({
-                'success': True,
-                'data': {
-                    'sql': result['sql_query'],
-                    'explanation': result['explanation'],
-                    'mode': 'agent'
-                },
-                'message': 'Query generated successfully using AI Agent'
-            })
+                    'success': True,
+                    'data': {
+                        'sql': result['sql_query'],
+                        'explanation': result['explanation'],
+                        'mode': 'agent'
+                    },
+                    'message': 'Query generated successfully using AI Agent'
+                })
+            except Exception as e:
+                # If AI Agent fails, fall back to direct mode
+                logger.warning(f"AI Agent service failed: {str(e)}")
+                logger.info("Falling back to direct mode")
+                
+                try:
+                    # Use direct mode as fallback
+                    loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(loop)
+                    result = loop.run_until_complete(
+                        openai_service.generate_sql(
+                            data['query'], 
+                            schema_info, 
+                            jira_context, 
+                            additional_context
+                        )
+                    )
+                    loop.close()
+                    
+                    return jsonify({
+                        'success': True,
+                        'data': {
+                            'sql': result['sql_query'],
+                            'explanation': result['explanation'],
+                            'mode': 'direct (fallback)'
+                        },
+                        'message': 'Query generated successfully using direct mode (fallback)'
+                    })
+                except Exception as fallback_error:
+                    logger.error(f"Fallback to direct mode also failed: {str(fallback_error)}")
+                    return jsonify({
+                        'success': False,
+                        'message': f'Failed to generate SQL: {str(fallback_error)}'
+                    }), 500
         
         else:
             return jsonify({
@@ -292,109 +325,169 @@ def execute_sql():
         sql_query = None
         ai_mode = None
         
-        if Config.is_direct_mode():
-            # Use OpenAI directly
-            if not openai_service.is_configured:
+        try:
+            if Config.is_direct_mode():
+                # Use OpenAI directly with mock fallback
+                try:
+                    # Use asyncio to run coroutine
+                    loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(loop)
+                    sql_result = loop.run_until_complete(
+                        openai_service.generate_sql(
+                            data['query'], 
+                            schema_info, 
+                            jira_context, 
+                            additional_context
+                        )
+                    )
+                    loop.close()
+                    
+                    sql_query = sql_result['sql_query']
+                    ai_mode = 'direct'
+                except Exception as e:
+                    logger.error(f"Direct OpenAI SQL generation failed: {str(e)}")
+                    raise Exception(f"Failed to generate SQL: {str(e)}")
+                
+            elif Config.is_agent_mode():
+                # Use AI Agent service with fallback to direct mode
+                try:
+                    # Prepare request for AI Agent
+                    ai_request = {
+                        'query': data['query'],
+                        'schema_info': schema_info
+                    }
+                    
+                    # Add context if available
+                    if jira_context:
+                        ai_request['jira_context'] = jira_context
+                    
+                    if additional_context:
+                        ai_request['additional_context'] = additional_context
+                    
+                    # Forward request to AI Agent
+                    sql_response = requests.post(
+                        f"{Config.AI_AGENT_URL}/generate-sql",
+                        json=ai_request,
+                        timeout=10  # Shorter timeout for faster fallback
+                    )
+                    
+                    if sql_response.status_code != 200:
+                        raise Exception(f"AI Agent returned error: {sql_response.text}")
+                    
+                    sql_result = sql_response.json()
+                    sql_query = sql_result['sql_query']
+                    ai_mode = 'agent'
+                    
+                except Exception as e:
+                    # If AI Agent fails, fall back to direct mode
+                    logger.warning(f"AI Agent SQL generation failed: {str(e)}")
+                    logger.info("Falling back to direct mode for SQL generation")
+                    
+                    # Use direct mode as fallback
+                    loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(loop)
+                    sql_result = loop.run_until_complete(
+                        openai_service.generate_sql(
+                            data['query'], 
+                            schema_info, 
+                            jira_context, 
+                            additional_context
+                        )
+                    )
+                    loop.close()
+                    
+                    sql_query = sql_result['sql_query']
+                    ai_mode = 'direct (fallback)'
+            else:
                 return jsonify({
                     'success': False,
-                    'message': 'OpenAI service is not configured with a valid API key'
-                }), 503
+                    'message': f'Invalid AI integration mode: {Config.AI_INTERACTION_MODE}'
+                }), 500
             
-            # Use asyncio to run coroutine
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            sql_result = loop.run_until_complete(
-                openai_service.generate_sql(
-                    data['query'], 
-                    schema_info, 
-                    jira_context, 
-                    additional_context
-                )
-            )
-            loop.close()
+            # Step 2: Execute SQL query against database
+            query_result = db_connection.execute_query(sql_query)
             
-            sql_query = sql_result['sql_query']
-            ai_mode = 'direct'
+            # Step 3: Get AI to explain the results
+            explanation = "Could not generate explanation."
             
-        elif Config.is_agent_mode():
-            # Use AI Agent service
-            # Prepare request for AI Agent
-            ai_request = {
-                'query': data['query'],
-                'schema_info': schema_info
-            }
+            if Config.is_direct_mode() or ai_mode == 'direct (fallback)':
+                try:
+                    # Use OpenAI directly for explanation
+                    loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(loop)
+                    explanation = loop.run_until_complete(
+                        openai_service.explain_results(
+                            data['query'],
+                            sql_query,
+                            query_result['results'],
+                            jira_context
+                        )
+                    )
+                    loop.close()
+                except Exception as e:
+                    logger.warning(f"Could not generate explanation using OpenAI directly: {str(e)}")
+                    explanation = f"This query returned {query_result['row_count']} results related to your search."
             
-            # Add context if available
-            if jira_context:
-                ai_request['jira_context'] = jira_context
-            
-            if additional_context:
-                ai_request['additional_context'] = additional_context
-            
-            # Forward request to AI Agent
-            sql_response = requests.post(
-                f"{Config.AI_AGENT_URL}/generate-sql",
-                json=ai_request,
-                timeout=30
-            )
-            
-            if sql_response.status_code != 200:
-                return jsonify({
-                    'success': False,
-                    'message': f'Failed to generate SQL: {sql_response.text}'
-                }), sql_response.status_code
-            
-            sql_result = sql_response.json()
-            sql_query = sql_result['sql_query']
-            ai_mode = 'agent'
-            
-        else:
+            elif Config.is_agent_mode() and ai_mode == 'agent':
+                try:
+                    # Use AI Agent for explanation
+                    explain_response = requests.post(
+                        f"{Config.AI_AGENT_URL}/explain-results",
+                        json={
+                            'query': data['query'],
+                            'sql': sql_query,
+                            'results': query_result['results'],
+                            'jira_context': jira_context
+                        },
+                        timeout=10
+                    )
+                    
+                    if explain_response.status_code == 200:
+                        explanation = explain_response.json()['explanation']
+                    else:
+                        # Fallback to direct mode for explanation
+                        logger.warning(f"AI Agent explanation failed with status {explain_response.status_code}")
+                        logger.info("Falling back to direct mode for results explanation")
+                        
+                        loop = asyncio.new_event_loop()
+                        asyncio.set_event_loop(loop)
+                        explanation = loop.run_until_complete(
+                            openai_service.explain_results(
+                                data['query'],
+                                sql_query,
+                                query_result['results'],
+                                jira_context
+                            )
+                        )
+                        loop.close()
+                        
+                except Exception as e:
+                    logger.warning(f"Could not generate explanation using AI Agent: {str(e)}")
+                    logger.info("Falling back to direct mode for results explanation")
+                    
+                    try:
+                        # Fallback to direct mode for explanation
+                        loop = asyncio.new_event_loop()
+                        asyncio.set_event_loop(loop)
+                        explanation = loop.run_until_complete(
+                            openai_service.explain_results(
+                                data['query'],
+                                sql_query,
+                                query_result['results'],
+                                jira_context
+                            )
+                        )
+                        loop.close()
+                    except Exception as fallback_error:
+                        logger.error(f"Fallback explanation also failed: {str(fallback_error)}")
+                        explanation = f"This query returned {query_result['row_count']} results related to your search."
+        
+        except Exception as e:
+            logger.error(f"Error in SQL execution flow: {str(e)}")
             return jsonify({
                 'success': False,
-                'message': f'Invalid AI integration mode: {Config.AI_INTERACTION_MODE}'
+                'message': f'Error executing query: {str(e)}'
             }), 500
-        
-        # Step 2: Execute SQL query against database
-        query_result = db_connection.execute_query(sql_query)
-        
-        # Step 3: Get AI to explain the results
-        explanation = "Could not generate explanation."
-        
-        if Config.is_direct_mode():
-            try:
-                # Use OpenAI directly for explanation
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-                explanation = loop.run_until_complete(
-                    openai_service.explain_results(
-                        data['query'],
-                        sql_query,
-                        query_result['results'],
-                        jira_context
-                    )
-                )
-                loop.close()
-            except Exception as e:
-                logger.warning(f"Could not generate explanation using OpenAI directly: {str(e)}")
-        
-        elif Config.is_agent_mode():
-            try:
-                # Use AI Agent for explanation
-                explain_response = requests.post(
-                    f"{Config.AI_AGENT_URL}/explain-results",
-                    json={
-                        'query': data['query'],
-                        'sql': sql_query,
-                        'results': query_result['results'],
-                        'jira_context': jira_context
-                    },
-                    timeout=30
-                )
-                
-                if explain_response.status_code == 200:
-                    explanation = explain_response.json()['explanation']
-            except Exception as e:
-                logger.warning(f"Could not generate explanation using AI Agent: {str(e)}")
         
         # Return complete response
         return jsonify({

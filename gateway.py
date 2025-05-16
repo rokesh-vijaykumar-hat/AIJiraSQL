@@ -253,9 +253,9 @@ def execute_sql():
     """
     Execute an SQL query generated from natural language.
     This endpoint will:
-    1. Convert the natural language to SQL via the AI Agent
+    1. Convert the natural language to SQL using the configured AI method
     2. Execute the SQL query against the database
-    3. Use the AI Agent to explain the results
+    3. Use the AI to explain the results
     """
     data = request.json
     
@@ -265,16 +265,10 @@ def execute_sql():
             'message': 'Query is required'
         }), 400
     
-    # Step 1: Generate SQL via AI Agent
+    # Get schema info from database
     schema_info = db_connection.get_schema_info()
     
-    # Prepare request for AI Agent
-    ai_request = {
-        'query': data['query'],
-        'schema_info': schema_info
-    }
-    
-    # Add Jira context if issue key is provided
+    # Extract Jira context if issue key is provided
     jira_context = None
     if 'jira_issue_key' in data and data['jira_issue_key']:
         try:
@@ -283,50 +277,120 @@ def execute_sql():
             asyncio.set_event_loop(loop)
             jira_context = loop.run_until_complete(jira_service.extract_context(data['jira_issue_key']))
             loop.close()
-            
-            ai_request['jira_context'] = jira_context
         except Exception as e:
             logger.warning(f"Could not extract Jira context: {str(e)}")
     
-    # Add additional context if provided
-    if 'additional_context' in data and data['additional_context']:
-        ai_request['additional_context'] = data['additional_context']
+    # Get additional context if provided
+    additional_context = data.get('additional_context')
     
     try:
-        # Step 1: Get SQL from AI Agent
-        sql_response = requests.post(
-            f"{Config.AI_AGENT_URL}/generate-sql",
-            json=ai_request,
-            timeout=30
-        )
+        # Step 1: Generate SQL via configured AI method
+        sql_query = None
+        ai_mode = None
         
-        if sql_response.status_code != 200:
+        if Config.is_direct_mode():
+            # Use OpenAI directly
+            if not openai_service.is_configured:
+                return jsonify({
+                    'success': False,
+                    'message': 'OpenAI service is not configured with a valid API key'
+                }), 503
+            
+            # Use asyncio to run coroutine
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            sql_result = loop.run_until_complete(
+                openai_service.generate_sql(
+                    data['query'], 
+                    schema_info, 
+                    jira_context, 
+                    additional_context
+                )
+            )
+            loop.close()
+            
+            sql_query = sql_result['sql_query']
+            ai_mode = 'direct'
+            
+        elif Config.is_agent_mode():
+            # Use AI Agent service
+            # Prepare request for AI Agent
+            ai_request = {
+                'query': data['query'],
+                'schema_info': schema_info
+            }
+            
+            # Add context if available
+            if jira_context:
+                ai_request['jira_context'] = jira_context
+            
+            if additional_context:
+                ai_request['additional_context'] = additional_context
+            
+            # Forward request to AI Agent
+            sql_response = requests.post(
+                f"{Config.AI_AGENT_URL}/generate-sql",
+                json=ai_request,
+                timeout=30
+            )
+            
+            if sql_response.status_code != 200:
+                return jsonify({
+                    'success': False,
+                    'message': f'Failed to generate SQL: {sql_response.text}'
+                }), sql_response.status_code
+            
+            sql_result = sql_response.json()
+            sql_query = sql_result['sql_query']
+            ai_mode = 'agent'
+            
+        else:
             return jsonify({
                 'success': False,
-                'message': f'Failed to generate SQL: {sql_response.text}'
-            }), sql_response.status_code
-        
-        sql_result = sql_response.json()
-        sql_query = sql_result['sql_query']
+                'message': f'Invalid AI integration mode: {Config.AI_INTERACTION_MODE}'
+            }), 500
         
         # Step 2: Execute SQL query against database
         query_result = db_connection.execute_query(sql_query)
         
         # Step 3: Get AI to explain the results
-        explain_response = requests.post(
-            f"{Config.AI_AGENT_URL}/explain-results",
-            json={
-                'query': data['query'],
-                'sql': sql_query,
-                'results': query_result['results'],
-                'jira_context': jira_context
-            },
-            timeout=30
-        )
-        
         explanation = "Could not generate explanation."
-        if explain_response.status_code == 200:
-            explanation = explain_response.json()['explanation']
+        
+        if Config.is_direct_mode():
+            try:
+                # Use OpenAI directly for explanation
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                explanation = loop.run_until_complete(
+                    openai_service.explain_results(
+                        data['query'],
+                        sql_query,
+                        query_result['results'],
+                        jira_context
+                    )
+                )
+                loop.close()
+            except Exception as e:
+                logger.warning(f"Could not generate explanation using OpenAI directly: {str(e)}")
+        
+        elif Config.is_agent_mode():
+            try:
+                # Use AI Agent for explanation
+                explain_response = requests.post(
+                    f"{Config.AI_AGENT_URL}/explain-results",
+                    json={
+                        'query': data['query'],
+                        'sql': sql_query,
+                        'results': query_result['results'],
+                        'jira_context': jira_context
+                    },
+                    timeout=30
+                )
+                
+                if explain_response.status_code == 200:
+                    explanation = explain_response.json()['explanation']
+            except Exception as e:
+                logger.warning(f"Could not generate explanation using AI Agent: {str(e)}")
         
         # Return complete response
         return jsonify({
@@ -336,7 +400,8 @@ def execute_sql():
                 'results': query_result['results'],
                 'row_count': query_result['row_count'],
                 'execution_time_ms': query_result['execution_time_ms'],
-                'explanation': explanation
+                'explanation': explanation,
+                'mode': ai_mode
             },
             'message': 'Query executed successfully'
         })

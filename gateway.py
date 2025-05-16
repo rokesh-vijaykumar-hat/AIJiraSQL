@@ -4,13 +4,26 @@ API Gateway module for routing requests between services
 import os
 import json
 import requests
+import logging
+import asyncio
 from flask import Blueprint, request, jsonify
+
+from database import DatabaseConnection
+from jira_service import JiraService
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 # Create a blueprint for the gateway routes
 gateway_bp = Blueprint('gateway', __name__)
 
 # AI Agent service URL - configurable from environment for Docker Compose
-AI_AGENT_URL = os.environ.get('AI_AGENT_URL', 'http://ai-agent:8080')
+AI_AGENT_URL = os.environ.get('AI_AGENT_URL', 'http://localhost:8080')
+
+# Initialize services
+db_connection = DatabaseConnection()
+jira_service = JiraService()
 
 @gateway_bp.route('/api/health', methods=['GET'])
 def check_health():
@@ -18,7 +31,8 @@ def check_health():
     health_status = {
         'gateway': 'healthy',
         'ai_agent': 'unknown',
-        'database': 'unknown'
+        'database': 'unknown',
+        'jira': 'unknown'
     }
     
     # Check AI Agent health
@@ -31,15 +45,85 @@ def check_health():
     except Exception as e:
         health_status['ai_agent'] = f'error: {str(e)}'
     
-    # Check database health - This would be implemented with a real DB connection
-    # For now, we're assuming it's connected if the environment variables are set
-    if os.environ.get('DATABASE_URL'):
-        health_status['database'] = 'connected'
+    # Check database health
+    if db_connection.is_configured:
+        try:
+            if db_connection.check_connection():
+                health_status['database'] = 'connected'
+            else:
+                health_status['database'] = 'error: could not connect'
+        except Exception as e:
+            health_status['database'] = f'error: {str(e)}'
+    else:
+        health_status['database'] = 'not configured'
+    
+    # Check Jira health
+    if jira_service.is_configured:
+        health_status['jira'] = 'configured'
+    else:
+        health_status['jira'] = 'not configured'
     
     return jsonify({
-        'status': 'ok' if all(v == 'healthy' or v == 'connected' for v in health_status.values()) else 'degraded',
+        'status': 'ok' if all(v in ['healthy', 'connected', 'configured'] for v in health_status.values()) else 'degraded',
         'services': health_status
     })
+
+@gateway_bp.route('/api/jira/issues/<issue_key>', methods=['GET'])
+def get_jira_issue(issue_key):
+    """Get a Jira issue by key"""
+    if not jira_service.is_configured:
+        return jsonify({
+            'success': False,
+            'message': 'Jira integration is not configured'
+        }), 503
+    
+    try:
+        # Use asyncio to run coroutine
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        issue = loop.run_until_complete(jira_service.get_issue(issue_key))
+        loop.close()
+        
+        return jsonify({
+            'success': True,
+            'data': issue,
+            'message': 'Issue retrieved successfully'
+        })
+    except Exception as e:
+        return jsonify({
+            'success': False,
+            'message': f'Error retrieving Jira issue: {str(e)}'
+        }), 500
+
+@gateway_bp.route('/api/jira/context/<issue_key>', methods=['GET'])
+def get_jira_context(issue_key):
+    """Extract context from a Jira issue"""
+    if not jira_service.is_configured:
+        return jsonify({
+            'success': False,
+            'message': 'Jira integration is not configured'
+        }), 503
+    
+    try:
+        # Use asyncio to run coroutine
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        context = loop.run_until_complete(jira_service.extract_context(issue_key))
+        loop.close()
+        
+        return jsonify({
+            'success': True,
+            'data': {
+                'issue_key': issue_key,
+                'context': context
+            },
+            'message': 'Context extracted successfully'
+        })
+    except Exception as e:
+        return jsonify({
+            'success': False,
+            'message': f'Error extracting context: {str(e)}'
+        }), 500
 
 @gateway_bp.route('/api/sql/generate', methods=['POST'])
 def generate_sql():
@@ -52,9 +136,8 @@ def generate_sql():
             'message': 'Query is required'
         }), 400
     
-    # Get schema info from database - this would be a real implementation
-    # For demonstration, we'll use a mock schema
-    schema_info = get_schema_info()
+    # Get schema info from database
+    schema_info = db_connection.get_schema_info()
     
     # Prepare request for AI Agent
     ai_request = {
@@ -62,11 +145,21 @@ def generate_sql():
         'schema_info': schema_info
     }
     
-    # Add optional fields if present
-    if 'jira_context' in data:
-        ai_request['jira_context'] = data['jira_context']
+    # Add Jira context if issue key is provided
+    if 'jira_issue_key' in data and data['jira_issue_key']:
+        try:
+            # Use asyncio to run coroutine
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            jira_context = loop.run_until_complete(jira_service.extract_context(data['jira_issue_key']))
+            loop.close()
+            
+            ai_request['jira_context'] = jira_context
+        except Exception as e:
+            logger.warning(f"Could not extract Jira context: {str(e)}")
     
-    if 'additional_context' in data:
+    # Add additional context if provided
+    if 'additional_context' in data and data['additional_context']:
         ai_request['additional_context'] = data['additional_context']
     
     try:
@@ -118,7 +211,7 @@ def execute_sql():
         }), 400
     
     # Step 1: Generate SQL via AI Agent
-    schema_info = get_schema_info()
+    schema_info = db_connection.get_schema_info()
     
     # Prepare request for AI Agent
     ai_request = {
@@ -126,15 +219,26 @@ def execute_sql():
         'schema_info': schema_info
     }
     
-    # Add optional fields if present
-    if 'jira_context' in data:
-        ai_request['jira_context'] = data['jira_context']
+    # Add Jira context if issue key is provided
+    jira_context = None
+    if 'jira_issue_key' in data and data['jira_issue_key']:
+        try:
+            # Use asyncio to run coroutine
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            jira_context = loop.run_until_complete(jira_service.extract_context(data['jira_issue_key']))
+            loop.close()
+            
+            ai_request['jira_context'] = jira_context
+        except Exception as e:
+            logger.warning(f"Could not extract Jira context: {str(e)}")
     
-    if 'additional_context' in data:
+    # Add additional context if provided
+    if 'additional_context' in data and data['additional_context']:
         ai_request['additional_context'] = data['additional_context']
     
     try:
-        # Get SQL from AI Agent
+        # Step 1: Get SQL from AI Agent
         sql_response = requests.post(
             f"{AI_AGENT_URL}/generate-sql",
             json=ai_request,
@@ -151,11 +255,7 @@ def execute_sql():
         sql_query = sql_result['sql_query']
         
         # Step 2: Execute SQL query against database
-        # This would be a real database query in a production system
-        # For demonstration, we'll use mock data
-        start_time = 0.0
-        query_results = execute_mock_query(sql_query)
-        execution_time_ms = 42.5  # Mock execution time
+        query_result = db_connection.execute_query(sql_query)
         
         # Step 3: Get AI to explain the results
         explain_response = requests.post(
@@ -163,129 +263,48 @@ def execute_sql():
             json={
                 'query': data['query'],
                 'sql': sql_query,
-                'results': query_results,
-                'jira_context': data.get('jira_context')
+                'results': query_result['results'],
+                'jira_context': jira_context
             },
             timeout=30
         )
         
-        if explain_response.status_code != 200:
-            # Return results without explanation if explanation fails
-            return jsonify({
-                'success': True,
-                'data': {
-                    'sql': sql_query,
-                    'results': query_results,
-                    'row_count': len(query_results),
-                    'execution_time_ms': execution_time_ms,
-                    'explanation': "Could not generate explanation."
-                },
-                'message': 'Query executed successfully, but explanation failed.'
-            })
-        
-        explanation = explain_response.json()['explanation']
+        explanation = "Could not generate explanation."
+        if explain_response.status_code == 200:
+            explanation = explain_response.json()['explanation']
         
         # Return complete response
         return jsonify({
             'success': True,
             'data': {
                 'sql': sql_query,
-                'results': query_results,
-                'row_count': len(query_results),
-                'execution_time_ms': execution_time_ms,
+                'results': query_result['results'],
+                'row_count': query_result['row_count'],
+                'execution_time_ms': query_result['execution_time_ms'],
                 'explanation': explanation
             },
             'message': 'Query executed successfully'
         })
         
     except Exception as e:
+        logger.error(f"Error executing query: {str(e)}")
         return jsonify({
             'success': False,
             'message': f'Error executing query: {str(e)}'
         }), 500
 
-def get_schema_info():
-    """
-    Get database schema information.
-    In a real implementation, this would query the database for its schema.
-    For demonstration, we'll return a mock schema.
-    """
-    return {
-        "tables": [
-            {
-                "name": "customers",
-                "columns": [
-                    {"name": "id", "type": "integer", "primary_key": True},
-                    {"name": "name", "type": "varchar(100)"},
-                    {"name": "email", "type": "varchar(100)"},
-                    {"name": "country", "type": "varchar(50)"},
-                    {"name": "created_at", "type": "timestamp"}
-                ]
-            },
-            {
-                "name": "orders",
-                "columns": [
-                    {"name": "id", "type": "integer", "primary_key": True},
-                    {"name": "customer_id", "type": "integer", "foreign_key": "customers.id"},
-                    {"name": "order_date", "type": "date"},
-                    {"name": "amount", "type": "decimal(10,2)"},
-                    {"name": "status", "type": "varchar(20)"}
-                ]
-            },
-            {
-                "name": "products",
-                "columns": [
-                    {"name": "id", "type": "integer", "primary_key": True},
-                    {"name": "name", "type": "varchar(100)"},
-                    {"name": "category", "type": "varchar(50)"},
-                    {"name": "price", "type": "decimal(10,2)"},
-                    {"name": "inventory", "type": "integer"}
-                ]
-            },
-            {
-                "name": "order_items",
-                "columns": [
-                    {"name": "id", "type": "integer", "primary_key": True},
-                    {"name": "order_id", "type": "integer", "foreign_key": "orders.id"},
-                    {"name": "product_id", "type": "integer", "foreign_key": "products.id"},
-                    {"name": "quantity", "type": "integer"},
-                    {"name": "price", "type": "decimal(10,2)"}
-                ]
-            }
-        ],
-        "relationships": [
-            {"from": "orders.customer_id", "to": "customers.id"},
-            {"from": "order_items.order_id", "to": "orders.id"},
-            {"from": "order_items.product_id", "to": "products.id"}
-        ]
-    }
-
-def execute_mock_query(sql_query):
-    """
-    Execute a mock query and return sample results.
-    In a real implementation, this would execute the query against a database.
-    """
-    # For demonstration, we'll return different mock data based on the query
-    if 'customers' in sql_query.lower() and 'orders' not in sql_query.lower():
-        return [
-            {"id": 1, "name": "John Doe", "email": "john@example.com", "country": "USA", "created_at": "2023-01-15"},
-            {"id": 2, "name": "Jane Smith", "email": "jane@example.com", "country": "Canada", "created_at": "2023-02-20"},
-            {"id": 3, "name": "Robert Brown", "email": "robert@example.com", "country": "UK", "created_at": "2023-03-10"}
-        ]
-    elif 'orders' in sql_query.lower():
-        return [
-            {"id": 101, "customer_id": 1, "order_date": "2023-04-05", "amount": 245.50, "status": "Completed"},
-            {"id": 102, "customer_id": 1, "order_date": "2023-05-10", "amount": 125.75, "status": "Completed"},
-            {"id": 103, "customer_id": 2, "order_date": "2023-04-15", "amount": 89.99, "status": "Completed"},
-            {"id": 104, "customer_id": 3, "order_date": "2023-05-20", "amount": 175.25, "status": "Processing"}
-        ]
-    elif 'products' in sql_query.lower():
-        return [
-            {"id": 201, "name": "Laptop", "category": "Electronics", "price": 1299.99, "inventory": 45},
-            {"id": 202, "name": "Smartphone", "category": "Electronics", "price": 899.99, "inventory": 60},
-            {"id": 203, "name": "Headphones", "category": "Accessories", "price": 149.99, "inventory": 100},
-            {"id": 204, "name": "Monitor", "category": "Electronics", "price": 349.99, "inventory": 30}
-        ]
-    else:
-        # Default response
-        return [{"result": "No data available for this query"}]
+@gateway_bp.route('/api/db/schema', methods=['GET'])
+def get_schema():
+    """Get database schema information"""
+    try:
+        schema = db_connection.get_schema_info()
+        return jsonify({
+            'success': True,
+            'data': schema,
+            'message': 'Schema retrieved successfully'
+        })
+    except Exception as e:
+        return jsonify({
+            'success': False,
+            'message': f'Error retrieving schema: {str(e)}'
+        }), 500

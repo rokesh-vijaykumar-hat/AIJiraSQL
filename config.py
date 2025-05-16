@@ -38,7 +38,7 @@ class Config:
     AI_INTERACTION_MODE = os.environ.get("AI_INTERACTION_MODE", "agent").lower()
     
     # AI Agent service URL (used when AI_INTERACTION_MODE = "agent")
-    AI_AGENT_URL = os.environ.get("AI_AGENT_URL", "http://localhost:8080")
+    AI_AGENT_URL = os.environ.get("AI_AGENT_URL", "http://0.0.0.0:8080")
     
     # Jira settings
     JIRA_URL = os.environ.get("JIRA_URL", "")

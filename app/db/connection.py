@@ -8,6 +8,8 @@ from app.core.logging import get_logger
 
 logger = get_logger(__name__)
 
+logger.info(f"Loaded DB URL: {settings.DATABASE_URL}")
+
 # Create async engine
 engine = create_async_engine(
     settings.DATABASE_URL,

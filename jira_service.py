@@ -16,6 +16,10 @@ class JiraService:
         self.jira_url = os.environ.get("JIRA_URL", "")
         self.jira_user = os.environ.get("JIRA_USER_EMAIL", "")
         self.jira_api_token = os.environ.get("JIRA_API_TOKEN", "")
+
+        print(self.jira_api_token)
+        print(self.jira_url)
+        print(self.jira_user)
         
         # For testing purposes, we'll override the configuration status to ensure functionality
         # In a production environment, you would use the actual credentials

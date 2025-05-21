@@ -45,7 +45,7 @@ def check_health():
         
         # Try connecting to the AI Agent service
         try:
-            ai_response = requests.get(f"{Config.AI_AGENT_URL}/health", timeout=5)
+            ai_response = requests.get(f"{Config.AI_AGENT_URL}", timeout=5)
             if ai_response.status_code == 200:
                 health_status['ai_integration'] = 'healthy'
             else:

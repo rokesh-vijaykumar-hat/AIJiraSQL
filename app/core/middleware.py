@@ -22,6 +22,9 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         logger.info(f"Rate limiting middleware initialized: {settings.RATE_LIMIT_REQUESTS} requests per {settings.RATE_LIMIT_PERIOD} seconds")
 
     async def dispatch(self, request: Request, call_next):
+        if request.headers.get("upgrade", "").lower() == "websocket":
+            return await call_next(request)  # Or pass through without rate limiting
+        
         if not settings.RATE_LIMIT_ENABLED:
             return await call_next(request)
 

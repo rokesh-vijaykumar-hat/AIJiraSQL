@@ -3,6 +3,11 @@ Configuration module for the AI SQL Agent API.
 """
 import os
 import logging
+from dotenv import load_dotenv
+dotenv_loaded = load_dotenv()
+print("DEBUG: dotenv loaded:", dotenv_loaded)
+print("DEBUG: DATABASE_URL after dotenv load:", os.getenv("DATABASE_URL"))
+
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -25,7 +30,7 @@ class Config:
     DATABASE_URL = os.environ.get("DATABASE_URL", "")
     PGHOST = os.environ.get("PGHOST", "")
     PGDATABASE = os.environ.get("PGDATABASE", "")
-    PGPORT = os.environ.get("PGPORT", "5432")
+    PGPORT = os.environ.get("PGPORT", "")
     PGUSER = os.environ.get("PGUSER", "")
     PGPASSWORD = os.environ.get("PGPASSWORD", "")
     
@@ -84,3 +89,7 @@ class Config:
 
 # Validate configuration on module import
 Config.validate()
+logger.info(f"Loaded DB URL: {Config.DATABASE_URL}")
+print(f"PGPORT is: {os.getenv('PGPORT')}")
+print("DEBUG ENV DATABASE_URL:", os.getenv("DATABASE_URL"))
+print("Working directory:", os.getcwd())

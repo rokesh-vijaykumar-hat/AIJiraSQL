@@ -1,0 +1,31 @@
+version: '3.8'
+
+services:
+  app:
+    build: .
+    ports:
+      - "8501:8501"
+      - "6333:6333"
+    env_file: .env
+    depends_on:
+      - ollama
+
+  ollama:
+    image: ollama/ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_models:/root/.ollama
+    entrypoint: >
+      /bin/sh -c "
+        ollama serve &
+        sleep 10 &&
+        ollama pull gemma:2b &&
+        ollama pull nomic-embed-text &&
+        tail -f /dev/null"
+
+    # entrypoint: >
+    #   /bin/sh -c "ollama serve & sleep 10 && ollama run gemma2 && ollama pull nomic-embed-text && tail -f /dev/null"
+
+volumes:
+  ollama_models:

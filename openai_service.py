@@ -1,210 +1,95 @@
 """
 OpenAI integration service for direct interaction with OpenAI models.
 """
+"""
+AI Agent integration service for SQL generation and result explanation.
+"""
 import os
 import json
 import logging
 import time
 from typing import Dict, Any, List, Optional
 
-# Check if OpenAI API key is available
-OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
-if not OPENAI_API_KEY:
-    logging.warning("OPENAI_API_KEY environment variable not set. Direct OpenAI functionality will not work.")
+import httpx
 
-try:
-    from openai import OpenAI
-    
-    # Initialize OpenAI client if API key is available
-    openai_client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
-except ImportError:
-    logging.warning("OpenAI Python package not installed. Direct OpenAI functionality will not work.")
-    openai_client = None
+AI_AGENT_URL = os.getenv("AI_AGENT_URL", "http://ai-agent:8080")
 
 class OpenAIService:
     """
-    Service for direct interaction with OpenAI models.
+    Service for interaction with internal AI Agent for SQL generation and explanation.
     """
     def __init__(self):
-        self.api_key = OPENAI_API_KEY
-        self.client = openai_client
-        
-        # For testing purposes, we'll override the configuration status
-        # In production, you would use the actual API key
-        # self.is_configured = bool(self.api_key and self.client)
-        self.is_configured = True  # This forces the use of mock implementation
-        
-        if not self.api_key:
-            logging.warning("OpenAI service configured with mock implementation for testing.")
-    
-    async def generate_sql(self, query: str, schema_info: Dict[str, Any], jira_context: Optional[str] = None,
-                          additional_context: Optional[str] = None) -> Dict[str, str]:
+        self.agent_url = AI_AGENT_URL
+        self.is_configured = True  # Assuming AI Agent is always available
+
+    async def generate_sql(
+        self,
+        query: str,
+        schema_info: Dict[str, Any],
+        jira_context: Optional[str] = None,
+        additional_context: Optional[str] = None
+    ) -> Dict[str, str]:
         """
-        Generate SQL from natural language using OpenAI's GPT-4o model or the mock service.
-        
-        Args:
-            query: Natural language query
-            schema_info: Database schema information
-            jira_context: Additional context from Jira issue (optional)
-            additional_context: Any other context provided by user (optional)
-            
-        Returns:
-            Dictionary containing generated SQL query and explanation
-            
-        Raises:
-            Exception: If generation fails
+        Generate SQL using internal AI Agent.
         """
-        # Use the mock service for testing if OpenAI is not configured
-        if not self.api_key or not self.client:
-            try:
-                from mock_ai_service import MockAIService
-                mock_service = MockAIService()
-                logging.info("Using mock AI service for SQL generation")
-                return await mock_service.generate_sql(query, schema_info, jira_context, additional_context)
-            except Exception as e:
-                logging.error(f"Error using mock service: {str(e)}")
-                # Fall back to a basic mock if even that fails
-                return {
-                    "sql_query": f"SELECT * FROM customers LIMIT 10 -- Mock query for: {query}",
-                    "explanation": "This is a mock SQL query generated for testing purposes."
-                }
-        
         try:
-            # Create prompt with schema info and context
-            schema_str = json.dumps(schema_info, indent=2)
-            prompt = f"""You are an AI SQL expert. Given the following database schema:
-            
-{schema_str}
+            payload = {
+                "query": query,
+                "schema_info": schema_info,
+                "jira_context": jira_context,
+                "additional_context": additional_context,
+            }
 
-Your task is to convert this natural language query into a valid SQL query:
-"{query}"
+            async with httpx.AsyncClient() as client:
+                start_time = time.time()
+                response = await client.post(f"{self.agent_url}/generate-sql", json=payload)
+                duration = time.time() - start_time
 
-"""
-            # Add Jira context if available
-            if jira_context:
-                prompt += f"\nAdditional context from Jira ticket:\n{jira_context}\n"
-            
-            # Add any additional context
-            if additional_context:
-                prompt += f"\nAdditional context provided by user:\n{additional_context}\n"
-            
-            # Add final instructions
-            prompt += """
-Please provide:
-1. The SQL query that would answer this question
-2. A brief explanation of what the query does
+            if response.status_code != 200:
+                raise Exception(f"AI Agent returned {response.status_code}: {response.text}")
 
-Format your response as a JSON object with keys 'sql_query' and 'explanation'.
-"""
-            
-            # Make request to OpenAI
-            start_time = time.time()
-            response = self.client.chat.completions.create(
-                model="gpt-4o",  # The newest OpenAI model is "gpt-4o" which was released May 13, 2024
-                messages=[{"role": "user", "content": prompt}],
-                response_format={"type": "json_object"}
-            )
-            end_time = time.time()
-            
-            # Parse response
-            content = response.choices[0].message.content
-            if content is not None and isinstance(content, str):
-                result = json.loads(content)
-                
-                logging.info(f"Query generation time: {end_time - start_time:.2f} seconds")
-                return {
-                    "sql_query": result["sql_query"],
-                    "explanation": result["explanation"]
-                }
-            else:
-                raise ValueError("Empty or invalid response from OpenAI API")
-        
+            result = response.json()
+            logging.info(f"SQL generation completed in {duration:.2f} seconds")
+            return {
+                "sql_query": result.get("sql_query", "-- No SQL returned"),
+                "explanation": result.get("explanation", "No explanation provided.")
+            }
+
         except Exception as e:
-            logging.error(f"Error generating SQL with OpenAI: {str(e)}")
-            
-            # Use mock service as fallback if OpenAI API fails
-            try:
-                from mock_ai_service import MockAIService
-                mock_service = MockAIService()
-                logging.info("Falling back to mock AI service for SQL generation")
-                return await mock_service.generate_sql(query, schema_info, jira_context, additional_context)
-            except Exception as mock_error:
-                logging.error(f"Error with fallback mock service: {str(mock_error)}")
-                # Provide a very basic fallback
-                return {
-                    "sql_query": f"SELECT * FROM customers LIMIT 10 -- Error fallback for: {query}",
-                    "explanation": "This is a fallback SQL query due to an error in generation."
-                }
-    
-    async def explain_results(self, query: str, sql: str, results: List[Dict[str, Any]], 
-                             jira_context: Optional[str] = None) -> str:
+            logging.error(f"Error calling AI Agent for SQL generation: {e}")
+            return {
+                "sql_query": f"SELECT * FROM customers LIMIT 10 -- Error fallback for: {query}",
+                "explanation": "Fallback SQL query due to error in AI Agent."
+            }
+
+    async def explain_results(
+        self,
+        query: str,
+        sql: str,
+        results: List[Dict[str, Any]],
+        jira_context: Optional[str] = None
+    ) -> str:
         """
-        Explain SQL query results in natural language using OpenAI's GPT-4o model or mock service.
-        
-        Args:
-            query: Original natural language query
-            sql: SQL query that was executed
-            results: Query results as a list of dictionaries
-            jira_context: Additional context from Jira issue (optional)
-            
-        Returns:
-            Natural language explanation of the results
-            
-        Raises:
-            Exception: If explanation fails
+        Explain SQL results using internal AI Agent.
         """
-        # Use the mock service for testing if OpenAI is not configured
-        if not self.api_key or not self.client:
-            try:
-                from mock_ai_service import MockAIService
-                mock_service = MockAIService()
-                logging.info("Using mock AI service for result explanation")
-                return await mock_service.explain_results(query, sql, results, jira_context)
-            except Exception as e:
-                logging.error(f"Error using mock service for explanation: {str(e)}")
-                # Fall back to a basic explanation if even that fails
-                row_count = len(results)
-                return f"The query returned {row_count} results based on your request about {query}."
-        
         try:
-            results_str = json.dumps(results, indent=2)
-            prompt = f"""You are an AI SQL expert. Given the following:
+            payload = {
+                "query": query,
+                "sql": sql,
+                "results": results,
+                "jira_context": jira_context
+            }
 
-Original Query: "{query}"
+            async with httpx.AsyncClient() as client:
+                response = await client.post(f"{self.agent_url}/explain-results", json=payload)
 
-SQL Query: "{sql}"
+            if response.status_code != 200:
+                raise Exception(f"AI Agent returned {response.status_code}: {response.text}")
 
-Query Results:
-{results_str}
+            result = response.json()
+            return result.get("explanation", "No explanation provided.")
 
-Please provide a clear, concise explanation of these results in natural language that would help a business user understand what the data shows. 
-Focus on key insights and patterns in the data if applicable.
-"""
-
-            if jira_context:
-                prompt += f"\nAdditional context from Jira ticket:\n{jira_context}\n"
-            
-            # Make request to OpenAI
-            response = self.client.chat.completions.create(
-                model="gpt-4o",  # The newest OpenAI model is "gpt-4o" which was released May 13, 2024
-                messages=[{"role": "user", "content": prompt}]
-            )
-            
-            explanation = response.choices[0].message.content
-            
-            return explanation if explanation else "Could not generate an explanation."
-        
         except Exception as e:
-            logging.error(f"Error explaining results with OpenAI: {str(e)}")
-            
-            # Fall back to mock service
-            try:
-                from mock_ai_service import MockAIService
-                mock_service = MockAIService()
-                logging.info("Falling back to mock AI service for result explanation")
-                return await mock_service.explain_results(query, sql, results, jira_context)
-            except Exception as mock_error:
-                logging.error(f"Error with fallback mock explanation: {str(mock_error)}")
-                # Provide a very basic fallback
-                row_count = len(results)
-                return f"The query returned {row_count} results that match your criteria."
+            logging.error(f"Error calling AI Agent for result explanation: {e}")
+            row_count = len(results)
+            return f"The query returned {row_count} results based on your request about {query}."

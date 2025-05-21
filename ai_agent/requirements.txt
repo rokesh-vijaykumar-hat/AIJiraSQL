@@ -1,8 +1,0 @@
-streamlit
-psycopg2-binary
-python-dotenv
-requests
-hf_xet
-numpy
-qdrant-client
-rapidfuzz
